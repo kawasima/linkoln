@@ -22,7 +22,14 @@
            [java.net URI]))
 
 (defn init []
-  (model/create-schema))
+  (model/create-schema)
+  (when-not (model/query '{:find [?s .]
+                           :in [$]
+                           :where [[?s :user/name "admin"]]})
+    (model/transact [{:db/id #db/id[db.part/user -1]
+                      :user/name "admin"
+                      :user/password "admin"
+                      :user/role :user.role/teacher}])))
 
 (defn- layout [& contents]
   (html5
@@ -36,51 +43,92 @@
      [:div.container
       [:a.item.title
        [:i.green.student.icon]
-       "Linkoln"]]]
-    [:div.wrapper contents]]))
+       "Linkoln"]
+      [:div.right.menu
+      [:a.ui.item {:href "/logout"} "Logout"]]]]
+    [:div.wrapper
+     [:div.full.height contents]]]))
 
-(defn- list-exercise [exercises]
+(defn- list-exercise [exercises {{role :role} :session username :identity :as req}]
   (layout
    [:h2.ui.header
-    [:i.student.icon]
+    [:i.user.icon]
     [:div.content "Your course"]]
    [:table.ui.celled.table
     [:thead
      [:tr
-      [:th {:colspan 2} "Exercises"]]]
+      [:th {:colspan 3} "Exercises"]]]
     [:tbody
      (for [exercise exercises]
-       [:tr
-        [:td (:exercise/name exercise)]
-        [:td (if-let [status (:answer/status exercise)]
-               [:div
-                [:div.ui.label (name (:db/ident status))]
-                (:exercise/url exercise)]
-               [:form.ui.form {:action (str "/exercise/" (:db/id exercise) "/fork")  :method "POST"}
-                (anti-forgery-field)
-                [:button.ui.positive.button {:type "submit"} "solve"]])]])]]
-   [:a.ui.primary.button {:href "/exercise/new"} "New exercise"]))
+       (let [status (get-in exercise [:answer/status :db/ident])]
+         [:tr
+          [:td (:exercise/name exercise)]
+          [:td (case status
+                 :answer.status/started
+                 [:div
+                  (str (name (:scheme req)) "://" (:server-name req) ":" (:server-port req) "/git/" (name username) "/" (:exercise/name exercise) ".git")]
+                 :answer.status/submitted
+                 [:div
+                  "submitted"]
+                 [:pre (exercise/get-readme exercise)])]
+          [:td (case status
+                 :answer.status/started
+                 [:a.ui.negative.button {:href ""} "Abandon"]
+                 :answer.status/submitted
+                 ""
+                 [:form.ui.form {:action (str "/exercise/" (:db/id exercise) "/fork")  :method "POST"}
+                  (anti-forgery-field)
+                  [:button.ui.positive.button {:type "submit"} "solve"]])]]))]]
+   (when (= role :user.role/teacher)
+     [:a.ui.primary.button {:href "/admin/exercises/new"} "New exercise"])))
 
 (defn- new-exercise [req]
   (layout
-  req
-   [:form.ui.form {:action "/exercise/new" :method "POST"}
+   [:form.ui.form {:action "/admin/exercises/new" :method "POST"}
     (anti-forgery-field)
-    [:div.fields
-     [:div.field
-      [:label "Name"]
-      [:input {:type "text" :name "name" :placeholder "Excercise name"}]]
-     [:div.field
-      [:label "URL"]
-      [:input {:type "text" :name "url" :placeholder ""}]]]
-    [:button.ui.button {:type "submit"} "Save"]]))
+    [:div.field
+     [:label "Name"]
+     [:input {:type "text" :name "name" :placeholder "Excercise name"}]]
+    [:div.field
+     [:label "URL"]
+     [:input {:type "text" :name "url" :placeholder ""}]]
+    [:button.ui.positive.button {:type "submit"} "Save"]]))
 
-(defn- admin [req]
+(defn- list-users [users]
   (layout
-   [:h1 "Logged in as " [:strong (name (get-in req [:session :identity]))]]
-   [:a {:href "/"} "To Home"]
-   (if (authenticated? req)
-     [:a {:href "/logout"} "Logout"])))
+   [:h2.ui.header
+    [:i.users.icon]
+    [:div.content "Users"]]
+   [:div.right.aligned
+    [:a.ui.button {:href "/admin/users/new"} "New"]]
+   [:table.ui.celled.table
+    [:thead
+     [:tr
+      [:th "Name"]
+      [:th "Role"]]]
+    [:tbody
+     (for [user users]
+       [:tr
+        [:td (:user/name user)]
+        [:td (get-in user [:user/role :db/ident])]])]]))
+
+(defn- new-user [req]
+  (layout
+   [:form.ui.form {:action "/admin/users/new" :method "POST"}
+    (anti-forgery-field)
+    [:div.two.fields
+     [:div.field
+      [:label "Username"]
+      [:input {:type "text" :name "name" :placeholder "Username"}]]
+     [:div.field
+      [:label "Password"]
+      [:input {:type "password" :name "password" :placeholder "Password"}]]]
+    [:div.field
+     [:label "Role"]
+     [:select {:name "role"}
+      [:option {:value "student"} "student"]
+      [:option {:value "teacher"} "teacher"]]]
+    [:button.ui.positive.button {:type "submit"} "Save"]]))
 
 (defn login-get [req]
   (layout
@@ -97,14 +145,16 @@
       [:button.fluid.ui.positive.button {:type "submit"} "Login"]]]]))
 
 (defn login-post [req]
-  (let [username (get-in req [:form-params "username"])]
-    (when-not (model/query '{:find [?s .]
-                             :in [$ ?uname]
-                             :where [[?s :student/name ?uname]]} username)
-      (model/transact [{:db/id #db/id[db.part/user -1]
-                        :student/name username}]))
-    (-> (redirect (get-in req [:query-params "next"] "/"))
-        (assoc-in [:session :identity] (keyword username)))))
+  (let [username (get-in req [:form-params "username"])
+        password (get-in req [:form-params "password"])]
+    (if-let [user (model/query '{:find [(pull ?s [:* {:user/role [:db/ident]}]) .]
+                                    :in [$ ?uname ?passwd]
+                                    :where [[?s :user/name ?uname]
+                                            [?s :user/password ?passwd]]} username password)] 
+      (-> (redirect (get-in req [:query-params "next"] "/"))
+          (assoc-in [:session :identity] (keyword username))
+          (assoc-in [:session :role] (get-in user [:user/role :db/ident])))
+      (login-get req))))
 
 (defn logout []
   (-> (redirect "/")
@@ -112,36 +162,64 @@
 
 (defroutes app-routes
   (GET "/" req
-    (redirect "/exercise/"))
-  (GET "/exercise/" req
+    (redirect "/exercises/"))
+  (GET "/login" req (login-get req))
+  (POST "/login" req (login-post req))
+  (GET "/logout" [] (logout))
+  (GET "/exercises/" req
     (let [exercises (model/query '{:find [[(pull ?exercise [:*]) ...]]
                                    :where [[?exercise :exercise/name]]})
           username (name (get-in req [:session :identity]))]
       (list-exercise (map #(if-let [answer (model/query '{:find [(pull ?a [:* {:answer/status [:db/ident]}]) .]
                                                   :in [$ ?e ?username]
                                                   :where [[?e :exercise/answers ?a]
-                                                          [?a :answer/student   ?s]
-                                                          [?s :student/name ?username]]} (:db/id %) username)]
+                                                          [?a :answer/user   ?s]
+                                                          [?s :user/name ?username]]} (:db/id %) username)]
                      (merge % answer)
-                     %) exercises))))
-  (GET "/admin/" req (admin req))
-  (GET "/login" req (login-get req))
-  (POST "/login" req (login-post req))
-  (GET "/logout" [] (logout))
-  (GET "/exercise/new" req (new-exercise req))
-  (POST "/exercise/new" {{:keys [name url]} :params :as req}
+                     %) exercises)
+                     req)))
+
+  (POST "/exercise/:exercise-id/fork" {{exercise-id :exercise-id} :params :as req}
+    (let [username (name (get-in req [:session :identity]))
+          user (model/query '{:find [?s .] :in [$ ?name] :where [[?s :user/name ?name]]} username)]
+      (exercise/start-to-solve exercise-id username)
+      (model/transact [{:db/id #db/id[db.part/user -1]
+                        :answer/user user
+                        :answer/status :answer.status/started}
+                       [:db/add (Long/parseLong exercise-id) :exercise/answers #db/id[db.part/user -1]]])
+      (redirect "/exercises/")))
+  
+  (GET "/admin/exercises/" req
+    (let [exercises (model/query '{:find [[(pull ?exercise [:*]) ...]]
+                                   :where [[?exercise :exercise/name]]})
+          username (name (get-in req [:session :identity]))]
+      (list-exercise (map #(if-let [answer (model/query '{:find [(pull ?a [:* {:answer/status [:db/ident]}]) .]
+                                                  :in [$ ?e ?username]
+                                                  :where [[?e :exercise/answers ?a]
+                                                          [?a :answer/user   ?s]
+                                                          [?s :user/name ?username]]} (:db/id %) username)]
+                     (merge % answer)
+                     %) exercises)
+                     req)))
+  (GET "/admin/exercises/new" req (new-exercise req))
+  (POST "/admin/exercises/new" {{:keys [name url]} :params :as req}
+    (exercise/fork-exercise name url)
     (model/transact [{:db/id #db/id[db.part/user -1]
                       :exercise/name name
                       :exercise/url  (URI/create url)}])
-    (redirect "/exercise/"))
-  (POST "/exercise/:exercise-id/fork" {{exercise-id :exercise-id} :params :as req}
-    (let [username (name (get-in req [:session :identity]))
-          student (model/query '{:find [?s .] :in [$ ?name] :where [[?s :student/name ?name]]} username)]
-      (exercise/start-to-solve exercise-id username)
-      (model/transact [{:db/id #db/id[db.part/user -1]
-                        :answer/student student
-                        :answer/status :answer.status/started}
-                       [:db/add (Long/parseLong exercise-id) :exercise/answers #db/id[db.part/user -1]]])))
+    (redirect "/admin/exercises/"))
+  
+  (GET "/admin/users/" req
+    (let [users (model/query '{:find [[(pull ?u [:* {:user/role [:db/ident]}]) ...]]
+                               :where [[?u :user/name]]})]
+      (list-users users)))
+  (GET "/admin/users/new" req (new-user req))
+  (POST "/admin/users/new" {{:keys [name password role]} :params :as req}
+    (model/transact [{:db/id #db/id[db.part/user -1]
+                      :user/name name
+                      :user/password password
+                      :user/role (keyword "user.role" role)}])
+    (redirect "/admin/users/"))
   (GET "/css/linkoln.css" []
     (-> {:body (style/build)}
         (content-type "text/css")))
@@ -150,7 +228,7 @@
 (defn unauthorized-handler
   [req meta]
   (if (authenticated? req)
-    (redirect "/exercise")
+    (redirect "/exercises/")
     (redirect (format "/login?next=%s" (:uri req)))))
 
 (swap! gring/config assoc :repository-resolve-fn
@@ -158,8 +236,12 @@
          (let [{{owner :owner repo-name :name} :params} req]
            (.open (FileResolver. (io/file "git" owner) true) nil repo-name))))
 
+(defn admin? [request]
+  (and (authenticated? request)
+       (= (get-in request [:session :role]) :user.role/teacher)))
 (def app
-  (let [rules [{:pattern #"^/(admin|exercise)/.*" :handler authenticated?}]
+  (let [rules [{:pattern #"^/exercises/.*" :handler authenticated?}
+               {:pattern #"^/admin/.*" :handler admin?}]
         backend (session-backend {:unauthorized-handler unauthorized-handler})]
     (routes
      (context ["/git/:owner" :owner #"[0-9A-Za-z\-\.]+"] [owner]

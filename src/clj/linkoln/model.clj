@@ -29,12 +29,14 @@
             [answers :ref :many]))
    (schema answer
            (fields
-            [student :ref]
+            [user :ref]
             [status :enum [:started :submitted]]
             [score :float]))
-   (schema student
+   (schema user
            (fields
-            [name :string :unique-value]))])
+            [name :string :unique-value]
+            [password :string]
+            [role :enum [:student :teacher]]))])
 
 (defn create-schema []
   (d/create-database uri)

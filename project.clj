@@ -1,4 +1,3 @@
-
 (defproject linkoln "0.1.0-SNAPSHOT"
   :description "Git-based self-study system"
   :url "https://github.com/kawasima/linkoln"
