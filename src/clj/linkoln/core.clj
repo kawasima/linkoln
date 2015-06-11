@@ -70,7 +70,7 @@
                  :answer.status/submitted
                  [:div
                   "submitted"]
-                 [:pre (exercise/get-readme exercise)])]
+                 (exercise/get-readme exercise))]
           [:td (case status
                  :answer.status/started
                  [:a.ui.negative.button {:href ""} "Abandon"]

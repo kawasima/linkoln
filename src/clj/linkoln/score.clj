@@ -9,6 +9,6 @@
   Scoring
   (calculate [workspace]
     (with-sh-dir workspace
-      (sh "mvn sonar:sonar -Dsonar.analysis.mode=preview -Dsonar.issuesReport.html.enable=true")))
+      (sh "mvn" "sonar:sonar" "-Dsonar.analysis.mode=preview" "-Dsonar.issuesReport.html.enable=true")))
   (issues [workspace]))
 
