@@ -13,6 +13,7 @@
                  [datomic-schema "1.3.0"]
                  [hiccup "1.0.5"]
                  [garden "1.2.5"]
+                 [me.raynes/fs "1.4.6"]
                  [net.unit8/gring "0.2.0"]
                  [org.pegdown/pegdown "1.5.0"]]
   :source-paths ["src/clj"]

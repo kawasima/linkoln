@@ -5,8 +5,10 @@
         [ring.util.anti-forgery :only [anti-forgery-field]]
         [ring.util.response :only [redirect response content-type]]
         [environ.core :only [env]]
+        [buddy.core.hash :only [sha256]]
         [buddy.auth :only [authenticated?]]
         [buddy.auth.backends.session :only [session-backend]]
+        [buddy.auth.backends.httpbasic :only [http-basic-backend]]
         [buddy.auth.middleware :only [wrap-authentication wrap-authorization]]
         [buddy.auth.accessrules :only [wrap-access-rules]]
         [hiccup.core :only [html]]
@@ -14,6 +16,7 @@
   (:require [clojure.java.io :as io]
             [compojure.handler :as handler]
             [compojure.route :as route]
+            [buddy.core.nonce :as nonce]
             [gring.core :as gring]
             (linkoln [model :as model]
                      [exercise :as exercise]
@@ -26,10 +29,14 @@
   (when-not (model/query '{:find [?s .]
                            :in [$]
                            :where [[?s :user/name "admin"]]})
-    (model/transact [{:db/id #db/id[db.part/user -1]
-                      :user/name "admin"
-                      :user/password "admin"
-                      :user/role :user.role/teacher}])))
+    (let [salt (nonce/random-nonce 16)]
+      (model/transact [{:db/id #db/id[db.part/user -1]
+                        :user/name "admin"
+                        :user/salt salt
+                        :user/password (-> (into-array Byte/TYPE (concat salt (.getBytes "admin")))
+                                           sha256
+                                           buddy.core.codecs/bytes->hex)
+                        :user/role :user.role/teacher}]))))
 
 (defn- layout [& contents]
   (html5
@@ -144,13 +151,20 @@
        [:i.lock.icon]]
       [:button.fluid.ui.positive.button {:type "submit"} "Login"]]]]))
 
+(defn auth-by-password [username password]
+  (model/query '{:find [(pull ?s [:* {:user/role [:db/ident]}]) .]
+                 :in [$ ?uname ?passwd]
+                 :where [[?s :user/name ?uname]
+                         [?s :user/salt ?salt]
+                         [(concat ?salt ?passwd) ?passwd-seq]
+                         [(into-array Byte/TYPE ?passwd-seq) ?passwd-bytes]
+                         [(buddy.core.hash/sha256 ?passwd-bytes) ?hash]
+                         [(buddy.core.codecs/bytes->hex ?hash) ?hash-hex]
+                         [?s :user/password ?hash-hex]]} username password))
 (defn login-post [req]
   (let [username (get-in req [:form-params "username"])
         password (get-in req [:form-params "password"])]
-    (if-let [user (model/query '{:find [(pull ?s [:* {:user/role [:db/ident]}]) .]
-                                    :in [$ ?uname ?passwd]
-                                    :where [[?s :user/name ?uname]
-                                            [?s :user/password ?passwd]]} username password)] 
+    (if-let [user (auth-by-password username password)] 
       (-> (redirect (get-in req [:query-params "next"] "/"))
           (assoc-in [:session :identity] (keyword username))
           (assoc-in [:session :role] (get-in user [:user/role :db/ident])))
@@ -215,11 +229,16 @@
       (list-users users)))
   (GET "/admin/users/new" req (new-user req))
   (POST "/admin/users/new" {{:keys [name password role]} :params :as req}
-    (model/transact [{:db/id #db/id[db.part/user -1]
-                      :user/name name
-                      :user/password password
-                      :user/role (keyword "user.role" role)}])
-    (redirect "/admin/users/"))
+    (let [salt (nonce/random-nonce 16)
+          password (-> (into-array Byte/TYPE (concat salt (.getBytes password)))
+                       sha256
+                       buddy.core.codecs/bytes->hex)]
+      (model/transact [{:db/id #db/id[db.part/user -1]
+                        :user/name name
+                        :user/password password
+                        :user/salt salt
+                        :user/role (keyword "user.role" role)}])
+      (redirect "/admin/users/")))
   (GET "/css/linkoln.css" []
     (-> {:body (style/build)}
         (content-type "text/css")))
@@ -242,12 +261,23 @@
 (def app
   (let [rules [{:pattern #"^/exercises/.*" :handler authenticated?}
                {:pattern #"^/admin/.*" :handler admin?}]
-        backend (session-backend {:unauthorized-handler unauthorized-handler})]
+        backend (session-backend {:unauthorized-handler unauthorized-handler})
+        backend-git (http-basic-backend {:realm "Linkoln" :authfn (fn [req auth]
+                                                                    (if (get-in req [:params :owner])
+                                                                      (auth-by-password (:username auth) (:password auth))))})]
     (routes
      (context ["/git/:owner" :owner #"[0-9A-Za-z\-\.]+"] [owner]
-       (wrap-defaults gring/git-routes api-defaults))
+       (-> gring/git-routes
+           (wrap-access-rules {:rules [{:pattern #".*"
+                                        :handler (fn [req]
+                                                   (authenticated? req))}]
+                               :policy :reject})
+           (wrap-authentication backend-git)
+           (wrap-authorization backend-git)
+           (wrap-defaults api-defaults))
+       )
      (-> app-routes
-        (wrap-access-rules {:rules rules :policy :allow})
+         (wrap-access-rules {:rules rules :policy :allow})
         (wrap-authentication backend)
         (wrap-authorization backend)
         (wrap-defaults site-defaults)))))

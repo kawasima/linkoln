@@ -36,6 +36,7 @@
            (fields
             [name :string :unique-value]
             [password :string]
+            [salt :bytes]
             [role :enum [:student :teacher]]))])
 
 (defn create-schema []
