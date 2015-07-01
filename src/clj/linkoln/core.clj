@@ -12,7 +12,8 @@
         [buddy.auth.middleware :only [wrap-authentication wrap-authorization]]
         [buddy.auth.accessrules :only [wrap-access-rules]]
         [hiccup.core :only [html]]
-        [hiccup.page :only [html5 include-css include-js]])
+        [hiccup.page :only [html5 include-css include-js]]
+        [linkoln.admin :only [admin-routes]])
   (:require [clojure.java.io :as io]
             [compojure.handler :as handler]
             [compojure.route :as route]
@@ -77,7 +78,7 @@
                  :answer.status/submitted
                  [:div
                   "submitted"]
-                 (exercise/get-readme exercise))]
+                 (:exercise/description exercise))]
           [:td (case status
                  :answer.status/started
                  [:a.ui.negative.button {:href ""} "Abandon"]
@@ -89,53 +90,6 @@
    (when (= role :user.role/teacher)
      [:a.ui.primary.button {:href "/admin/exercises/new"} "New exercise"])))
 
-(defn- new-exercise [req]
-  (layout
-   [:form.ui.form {:action "/admin/exercises/new" :method "POST"}
-    (anti-forgery-field)
-    [:div.field
-     [:label "Name"]
-     [:input {:type "text" :name "name" :placeholder "Excercise name"}]]
-    [:div.field
-     [:label "URL"]
-     [:input {:type "text" :name "url" :placeholder ""}]]
-    [:button.ui.positive.button {:type "submit"} "Save"]]))
-
-(defn- list-users [users]
-  (layout
-   [:h2.ui.header
-    [:i.users.icon]
-    [:div.content "Users"]]
-   [:div.right.aligned
-    [:a.ui.button {:href "/admin/users/new"} "New"]]
-   [:table.ui.celled.table
-    [:thead
-     [:tr
-      [:th "Name"]
-      [:th "Role"]]]
-    [:tbody
-     (for [user users]
-       [:tr
-        [:td (:user/name user)]
-        [:td (get-in user [:user/role :db/ident])]])]]))
-
-(defn- new-user [req]
-  (layout
-   [:form.ui.form {:action "/admin/users/new" :method "POST"}
-    (anti-forgery-field)
-    [:div.two.fields
-     [:div.field
-      [:label "Username"]
-      [:input {:type "text" :name "name" :placeholder "Username"}]]
-     [:div.field
-      [:label "Password"]
-      [:input {:type "password" :name "password" :placeholder "Password"}]]]
-    [:div.field
-     [:label "Role"]
-     [:select {:name "role"}
-      [:option {:value "student"} "student"]
-      [:option {:value "teacher"} "teacher"]]]
-    [:button.ui.positive.button {:type "submit"} "Save"]]))
 
 (defn login-get [req]
   (layout
@@ -164,7 +118,7 @@
 (defn login-post [req]
   (let [username (get-in req [:form-params "username"])
         password (get-in req [:form-params "password"])]
-    (if-let [user (auth-by-password username password)] 
+    (if-let [user (auth-by-password username password)]
       (-> (redirect (get-in req [:query-params "next"] "/"))
           (assoc-in [:session :identity] (keyword username))
           (assoc-in [:session :role] (get-in user [:user/role :db/ident])))
@@ -202,43 +156,6 @@
                         :answer/status :answer.status/started}
                        [:db/add (Long/parseLong exercise-id) :exercise/answers #db/id[db.part/user -1]]])
       (redirect "/exercises/")))
-  
-  (GET "/admin/exercises/" req
-    (let [exercises (model/query '{:find [[(pull ?exercise [:*]) ...]]
-                                   :where [[?exercise :exercise/name]]})
-          username (name (get-in req [:session :identity]))]
-      (list-exercise (map #(if-let [answer (model/query '{:find [(pull ?a [:* {:answer/status [:db/ident]}]) .]
-                                                  :in [$ ?e ?username]
-                                                  :where [[?e :exercise/answers ?a]
-                                                          [?a :answer/user   ?s]
-                                                          [?s :user/name ?username]]} (:db/id %) username)]
-                     (merge % answer)
-                     %) exercises)
-                     req)))
-  (GET "/admin/exercises/new" req (new-exercise req))
-  (POST "/admin/exercises/new" {{:keys [name url]} :params :as req}
-    (exercise/fork-exercise name url)
-    (model/transact [{:db/id #db/id[db.part/user -1]
-                      :exercise/name name
-                      :exercise/url  (URI/create url)}])
-    (redirect "/admin/exercises/"))
-  
-  (GET "/admin/users/" req
-    (let [users (model/query '{:find [[(pull ?u [:* {:user/role [:db/ident]}]) ...]]
-                               :where [[?u :user/name]]})]
-      (list-users users)))
-  (GET "/admin/users/new" req (new-user req))
-  (POST "/admin/users/new" {{:keys [name password role]} :params :as req}
-    (let [salt (nonce/random-nonce 16)
-          password (-> (into-array Byte/TYPE (concat salt (.getBytes password)))
-                       sha256
-                       buddy.core.codecs/bytes->hex)]
-      (model/transact [{:db/id #db/id[db.part/user -1]
-                        :user/name name
-                        :user/password password
-                        :user/salt salt
-                        :user/role (keyword "user.role" role)}])
-      (redirect "/admin/users/")))
   (GET "/css/linkoln.css" []
     (-> {:body (style/build)}
         (content-type "text/css")))
@@ -256,11 +173,11 @@
            (.open (FileResolver. (io/file "git" owner) true) nil repo-name))))
 
 (defn admin? [request]
+  (println (get-in request [:session]))
   (and (authenticated? request)
        (= (get-in request [:session :role]) :user.role/teacher)))
 (def app
-  (let [rules [{:pattern #"^/exercises/.*" :handler authenticated?}
-               {:pattern #"^/admin/.*" :handler admin?}]
+  (let [rules [{:pattern #"^/exercises/.*" :handler authenticated?}]
         backend (session-backend {:unauthorized-handler unauthorized-handler})
         backend-git (http-basic-backend {:realm "Linkoln" :authfn (fn [req auth]
                                                                     (if (get-in req [:params :owner])
@@ -274,11 +191,15 @@
                                :policy :reject})
            (wrap-authentication backend-git)
            (wrap-authorization backend-git)
-           (wrap-defaults api-defaults))
-       )
-     (-> app-routes
-         (wrap-access-rules {:rules rules :policy :allow})
-        (wrap-authentication backend)
-        (wrap-authorization backend)
-        (wrap-defaults site-defaults)))))
+           (wrap-defaults api-defaults)))
+     (-> (routes
+          (context "/admin" []
+            (-> admin-routes
+                (wrap-access-rules {:rules [{:pattern #".*" :handler admin?}]
+                                    :policy :allow})))
+          (-> app-routes
+              (wrap-access-rules {:rules rules :policy :allow})))
+         (wrap-authentication backend)
+         (wrap-authorization backend)
+         (wrap-defaults site-defaults)))))
 

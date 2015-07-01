@@ -25,13 +25,19 @@
   [(schema exercise
            (fields
             [name :string :indexed :unique-value :fulltext]
+            [description :string]
             [url :uri]
             [answers :ref :many]))
    (schema answer
            (fields
             [user :ref]
             [status :enum [:started :submitted]]
-            [score :float]))
+            [scorings :ref :many]))
+   (schema scoring
+           (fields
+            [:score :float]
+            [:comprehensive-evaluation :string]
+            [:comments :string :many]))
    (schema user
            (fields
             [name :string :unique-value]
